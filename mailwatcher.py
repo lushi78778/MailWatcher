@@ -1,4 +1,4 @@
-import imaplib
+from imapclient import IMAPClient
 import email
 import sqlite3
 import threading
@@ -11,13 +11,13 @@ from dotenv import load_dotenv
 # === 加载 .env 文件 ===
 load_dotenv()
 EMAIL_ACCOUNT = os.getenv("EMAIL_ACCOUNT")
-EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
+EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")  # 这里是授权码，而不是邮箱密码！
 IMAP_SERVER = os.getenv("IMAP_SERVER", "imap.126.com")
 IMAP_PORT = int(os.getenv("IMAP_PORT", 993))
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 30))
 
 # === 数据库配置（Render 只能用 `/tmp/` 目录存储临时数据） ===
-DB_FILE = "/tmp/emails.db"
+DB_FILE = "emails.db"
 
 # === Flask Web 服务器 ===
 app = Flask(__name__)
@@ -54,40 +54,47 @@ def get_emails():
     conn.close()
     return [email[0] for email in emails]
 
+
 def check_new_email():
-    """ 每隔一段时间轮询邮箱，获取新邮件 """
+    """ 轮询邮箱，检查未读邮件 """
     while True:
         try:
             print("🔍 正在检查新邮件...")
-            mail = imaplib.IMAP4_SSL(IMAP_SERVER, IMAP_PORT)
-            mail.login(EMAIL_ACCOUNT, EMAIL_PASSWORD)
-            mail.select("inbox")
 
-            # 搜索所有未读邮件
-            status, messages = mail.search(None, "UNSEEN")
+            with IMAPClient(IMAP_SERVER, port=IMAP_PORT, use_uid=True, ssl=True) as mail:
+                # **使用 AUTHENTICATE 方式登录**
+                mail.login(EMAIL_ACCOUNT, EMAIL_PASSWORD)
+                print("✅ 登录成功！")
 
-            if status == "OK":
-                for num in messages[0].split():
-                    status, msg_data = mail.fetch(num, "(RFC822)")
-                    for response_part in msg_data:
-                        if isinstance(response_part, tuple):
-                            msg = email.message_from_bytes(response_part[1])
+                # 获取邮箱文件夹，确保 "INBOX" 存在
+                folders = mail.list_folders()
+                print(f"📂 服务器上的文件夹: {folders}")
 
-                            # 解析邮件标题
-                            subject, encoding = decode_header(msg["Subject"])[0]
-                            if isinstance(subject, bytes) and encoding:
-                                subject = subject.decode(encoding)
+                # 选择收件箱
+                mail.select_folder("INBOX")
 
-                            print(f"📩 新邮件: {subject}")
-                            save_email(subject)
+                # 搜索未读邮件
+                messages = mail.search(["UNSEEN"])
+                print(f"📬 未读邮件数: {len(messages)}")
 
-                    mail.store(num, "+FLAGS", "\\Seen")  # 标记邮件为已读
+                for msg_id in messages:
+                    msg_data = mail.fetch(msg_id, ["RFC822"])
+                    msg = email.message_from_bytes(msg_data[msg_id][b"RFC822"])
 
-            mail.logout()
+                    # 解析邮件标题
+                    subject, encoding = decode_header(msg["Subject"])[0]
+                    if isinstance(subject, bytes):
+                        subject = subject.decode(encoding or "utf-8", errors="ignore")
+
+                    print(f"📩 新邮件: {subject}")
+
+                    # 标记为已读
+                    mail.add_flags(msg_id, ["\\Seen"])
+
         except Exception as e:
             print(f"❌ 发生错误: {e}")
 
-        time.sleep(CHECK_INTERVAL)  # 等待指定时间后再检查
+        time.sleep(CHECK_INTERVAL)
 
 @app.route("/")
 def index():
